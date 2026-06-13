@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .beamz import DiscreteMode, ModePlaneSpec, solve_beamz_mode
+
 # Re-export the small public API from package root so users do not need to know
 # the internal module split.
 from .constants import C_0, EPSILON_0
@@ -16,13 +18,16 @@ __all__ = [
     "C_0",
     "EPSILON_0",
     "BoundarySpec",
+    "DiscreteMode",
     "Grid",
     "Materials",
+    "ModePlaneSpec",
     "PmlSpec",
     "Result",
     "Spec",
     "Sweep",
     "overlap",
+    "solve_beamz_mode",
     "solve_grid",
     "solve_modes",
     "solve_slice",

@@ -40,6 +40,83 @@ def _strip_grid(nx: int = 5, ny: int = 4) -> tuple[np.ndarray, tuple[float, ...]
     return eps, x_edges, y_edges
 
 
+def _beamz_component_shapes(grid_shape: tuple[int, int, int]) -> dict[str, tuple[int, int, int]]:
+    """Return BEAMZ 3D Yee component shapes used by contract tests."""
+    nz, ny, nx = grid_shape
+    return {
+        "Ex": (nz, ny, nx - 1),
+        "Ey": (nz, ny - 1, nx),
+        "Ez": (nz - 1, ny, nx),
+        "Hx": (nz - 1, ny - 1, nx),
+        "Hy": (nz - 1, ny, nx - 1),
+        "Hz": (nz, ny - 1, nx - 1),
+    }
+
+
+def _indexed_shape(shape: tuple[int, int, int], index: tuple[object, object, object]) -> tuple[int, ...]:
+    """Return NumPy shape after applying one BEAMZ component index."""
+    out = []
+    for size, item in zip(shape, index, strict=True):
+        if isinstance(item, slice):
+            start, stop, step = item.indices(size)
+            out.append(max(0, 1 + (stop - start - 1) // step) if stop > start else 0)
+    return tuple(out)
+
+
+def _beamz_mode_plane_spec(axis: str = "x") -> mm.ModePlaneSpec:
+    """Return a small guided BEAMZ mode-plane spec."""
+    grid_shape = (7, 8, 9)
+    resolution = 0.12e-6
+    if axis == "x":
+        transverse_axes = ("z", "y")
+        shape = (grid_shape[0], grid_shape[1])
+        plane_index = 3
+        offset_index = 2
+        direction = "+x"
+    elif axis == "y":
+        transverse_axes = ("z", "x")
+        shape = (grid_shape[0], grid_shape[2])
+        plane_index = 3
+        offset_index = 2
+        direction = "+y"
+    else:
+        transverse_axes = ("y", "x")
+        shape = (grid_shape[1], grid_shape[2])
+        plane_index = 3
+        offset_index = 2
+        direction = "+z"
+
+    rows = np.arange(shape[0]) - 0.5 * (shape[0] - 1)
+    cols = np.arange(shape[1]) - 0.5 * (shape[1] - 1)
+    rr, cc = np.meshgrid(rows, cols, indexing="ij")
+    eps = np.where((np.abs(rr) <= 1.5) & (np.abs(cc) <= 1.5), 2.2**2, 1.44**2)
+    return mm.ModePlaneSpec(
+        scalar_permittivity=eps,
+        frequency=mm.C_0 / 1.55,
+        resolution=resolution,
+        dt=0.35 * resolution / 299_792_458.0,
+        axis=axis,
+        direction=direction,
+        solver_direction="+y" if axis == "y" else direction,
+        transverse_axes=transverse_axes,
+        grid_shape=grid_shape,
+        component_shapes=_beamz_component_shapes(grid_shape),
+        center=(
+            0.5 * grid_shape[2] * resolution,
+            0.5 * grid_shape[1] * resolution,
+            0.5 * grid_shape[0] * resolution,
+        ),
+        width=0.48e-6,
+        height=0.48e-6,
+        plane_index=plane_index,
+        offset_index=offset_index,
+        mode_index=0,
+        polarization="te",
+        target_neff=2.0,
+        num_modes=1,
+    )
+
+
 def test_grid_api_solves_with_scipy_solver():
     """Verify grid api solves with scipy solver."""
     eps, x_edges, y_edges = _strip_grid(6, 5)
@@ -75,6 +152,42 @@ def test_grid_api_solves_with_scipy_solver():
     anchor = electric.reshape(-1)[np.argmax(np.abs(electric.reshape(-1)))]
     assert anchor.real >= 0.0
     assert abs(anchor.imag) <= 1e-10 * max(abs(anchor), 1.0)
+
+
+@pytest.mark.parametrize("axis", ["x", "y", "z"])
+def test_beamz_mode_plane_contract_returns_component_local_profiles(axis: str):
+    """Verify BEAMZ contract returns component-local profile arrays."""
+    spec = _beamz_mode_plane_spec(axis)
+
+    discrete = mm.solve_beamz_mode(spec)
+
+    assert discrete.diagnostics["contract"] == "micromode.beamz.DiscreteMode/v1"
+    assert discrete.axis == axis
+    assert discrete.transverse_axes == spec.transverse_axes
+    assert np.isfinite(discrete.neff.real)
+    assert set(discrete.profiles) == {"Ex", "Ey", "Ez", "Hx", "Hy", "Hz"}
+    assert set(discrete.backward_profiles) == set(discrete.profiles)
+    assert set(discrete.component_indices) == set(discrete.profiles)
+
+    for component, profile in discrete.profiles.items():
+        index = discrete.component_indices[component]
+        assert profile.shape == _indexed_shape(spec.component_shapes[component], index)
+        assert discrete.backward_profiles[component].shape == profile.shape
+        assert np.isfinite(profile).all()
+
+    assert abs(float(discrete.diagnostics["power_after_phase_reference"])) == pytest.approx(1.0, rel=2e-6, abs=2e-6)
+
+
+def test_beamz_mode_plane_contract_validates_direction_axis():
+    """Verify BEAMZ contract rejects mismatched direction metadata."""
+    spec = _beamz_mode_plane_spec("x")
+    with pytest.raises(ValueError, match="direction axis"):
+        mm.ModePlaneSpec(
+            **{
+                **spec.__dict__,
+                "direction": "+y",
+            }
+        )
 
 
 def test_scipy_solver_reports_operator_diagnostics():
