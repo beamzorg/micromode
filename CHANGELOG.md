@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.0a6 - 2026-06-20
+
+- Added the BEAMZ discrete mode contract with mode-plane metadata, component
+  profiles, backward fields, and diagnostics.
+- Added BEAMZ-oriented field staggering, cropping, phase referencing, and
+  power-normalization paths.
+- Added regression coverage for BEAMZ mode-plane validation and component
+  profile behavior.
+- Tightened type annotations around BEAMZ mode candidates, axes, and component
+  indices so Pyright passes cleanly.
+
 ## 0.1.0a5 - 2026-05-23
 
 - Made the SciPy reference solver the default backend and removed the Rust
