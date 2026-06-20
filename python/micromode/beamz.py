@@ -360,12 +360,8 @@ def _build_x_profiles(fields: dict[str, np.ndarray], spec: ModePlaneSpec):
     hy_s = _stagger_half(fields["Hy"], axis=0)
     hz_s = _stagger_half(fields["Hz"], axis=1)
     nz, ny, _nx = spec.grid_shape
-    y_start, y_end = _padded_bounds(
-        spec.center[1], spec.width, spec.resolution, ny, spec.aperture_pad_cells
-    )
-    z_start, z_end = _padded_bounds(
-        spec.center[2], spec.height, spec.resolution, nz, spec.aperture_pad_cells
-    )
+    y_start, y_end = _padded_bounds(spec.center[1], spec.width, spec.resolution, ny, spec.aperture_pad_cells)
+    z_start, z_end = _padded_bounds(spec.center[2], spec.height, spec.resolution, nz, spec.aperture_pad_cells)
     staggered = {"Ex": ex_s, "Ey": ey_s, "Ez": ez_s, "Hx": hx_s, "Hy": hy_s, "Hz": hz_s}
     indices = {
         "Ex": (*_support_slices("Ex", "x", z_start, z_end, y_start, y_end, ex_s.shape), spec.offset_index),
@@ -375,9 +371,7 @@ def _build_x_profiles(fields: dict[str, np.ndarray], spec: ModePlaneSpec):
         "Hy": (*_support_slices("Hy", "x", z_start, z_end, y_start, y_end, hy_s.shape), spec.offset_index),
         "Hz": (*_support_slices("Hz", "x", z_start, z_end, y_start, y_end, hz_s.shape), spec.offset_index),
     }
-    profiles = _crop_window_all(
-        staggered, z_start, z_end, y_start, y_end, _direction_sign(spec.direction), spec
-    )
+    profiles = _crop_window_all(staggered, z_start, z_end, y_start, y_end, _direction_sign(spec.direction), spec)
     initial_power = _normalize_profiles_by_flux(
         profiles,
         axis="x",
@@ -395,12 +389,8 @@ def _build_y_profiles(fields: dict[str, np.ndarray], spec: ModePlaneSpec):
     hy_s = _stagger_both(fields["Hy"])
     hz_s = _stagger_half(fields["Hz"], axis=1)
     nz, _ny, nx = spec.grid_shape
-    x_start, x_end = _padded_bounds(
-        spec.center[0], spec.width, spec.resolution, nx, spec.aperture_pad_cells
-    )
-    z_start, z_end = _padded_bounds(
-        spec.center[2], spec.height, spec.resolution, nz, spec.aperture_pad_cells
-    )
+    x_start, x_end = _padded_bounds(spec.center[0], spec.width, spec.resolution, nx, spec.aperture_pad_cells)
+    z_start, z_end = _padded_bounds(spec.center[2], spec.height, spec.resolution, nz, spec.aperture_pad_cells)
     staggered = {"Ex": ex_s, "Ey": ey_s, "Ez": ez_s, "Hx": hx_s, "Hy": hy_s, "Hz": hz_s}
     indices = {
         "Ex": (*_support_slices("Ex", "y", z_start, z_end, x_start, x_end, ex_s.shape), spec.plane_index),
@@ -411,9 +401,7 @@ def _build_y_profiles(fields: dict[str, np.ndarray], spec: ModePlaneSpec):
         "Hz": (*_support_slices("Hz", "y", z_start, z_end, x_start, x_end, hz_s.shape), spec.offset_index),
     }
     indices = {name: (idx[0], idx[2], idx[1]) for name, idx in indices.items()}
-    profiles = _crop_window_all(
-        staggered, z_start, z_end, x_start, x_end, _direction_sign(spec.direction), spec
-    )
+    profiles = _crop_window_all(staggered, z_start, z_end, x_start, x_end, _direction_sign(spec.direction), spec)
     if _direction_sign(spec.direction) < 0.0:
         for component in ("Ex", "Ey", "Ez"):
             profiles[component] = -profiles[component]
@@ -434,12 +422,8 @@ def _build_z_profiles(fields: dict[str, np.ndarray], spec: ModePlaneSpec):
     hy_s = _stagger_half(fields["Hy"], axis=1)
     hz_s = _stagger_both(fields["Hz"])
     nz, ny, nx = spec.grid_shape
-    x_start, x_end = _padded_bounds(
-        spec.center[0], spec.width, spec.resolution, nx, spec.aperture_pad_cells
-    )
-    y_start, y_end = _padded_bounds(
-        spec.center[1], spec.height, spec.resolution, ny, spec.aperture_pad_cells
-    )
+    x_start, x_end = _padded_bounds(spec.center[0], spec.width, spec.resolution, nx, spec.aperture_pad_cells)
+    y_start, y_end = _padded_bounds(spec.center[1], spec.height, spec.resolution, ny, spec.aperture_pad_cells)
     e_z_idx = int(np.clip(spec.plane_index, 0, nz - 1))
     h_z_idx = int(np.clip(spec.offset_index, 0, max(nz - 2, 0)))
     ez_z_idx = int(np.clip(spec.plane_index, 0, max(nz - 2, 0)))
@@ -453,9 +437,7 @@ def _build_z_profiles(fields: dict[str, np.ndarray], spec: ModePlaneSpec):
         "Hy": (h_z_idx, *_support_slices("Hy", "z", y_start, y_end, x_start, x_end, hy_s.shape)),
         "Hz": (hz_z_idx, *_support_slices("Hz", "z", y_start, y_end, x_start, x_end, hz_s.shape)),
     }
-    profiles = _crop_window_all(
-        staggered, y_start, y_end, x_start, x_end, _direction_sign(spec.direction), spec
-    )
+    profiles = _crop_window_all(staggered, y_start, y_end, x_start, x_end, _direction_sign(spec.direction), spec)
     initial_power = _normalize_profiles_by_flux(
         profiles,
         axis="z",
@@ -632,9 +614,7 @@ def _phase_reference_profiles(
         axis_idx = _axis_index_from_component_indices(indices.get(component), axis)
         coord = _component_axis_coord(component, axis_idx, dummy_spec)
         delay = _numeric_phase_delay(omega, k_num, coord - ref_coord)
-        out[component] = np.asarray(value, dtype=np.complex128) * np.exp(
-            -1j * omega * delay
-        )
+        out[component] = np.asarray(value, dtype=np.complex128) * np.exp(-1j * omega * delay)
     return out
 
 
@@ -726,11 +706,7 @@ def _detect_transverse_symmetry_axes(
     symmetric = []
     for axis in range(eps.ndim):
         denom = float(np.sum(np.abs(eps) ** 2))
-        corr = (
-            0.0
-            if denom <= 1e-18
-            else float(np.real(np.sum(eps * np.flip(eps, axis=axis))) / denom)
-        )
+        corr = 0.0 if denom <= 1e-18 else float(np.real(np.sum(eps * np.flip(eps, axis=axis))) / denom)
         if corr >= threshold:
             symmetric.append(axis)
     return tuple(symmetric)
