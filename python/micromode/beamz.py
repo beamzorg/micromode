@@ -8,7 +8,7 @@ planes that BEAMZ can inject without another interpretation layer.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Literal, TypedDict, cast
 
 import numpy as np
 
@@ -20,8 +20,8 @@ PolarizationName = Literal["te", "tm"]
 ComponentIndex = tuple[slice | int, slice | int, slice | int]
 
 _COMPONENTS = ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")
-_AXIS_INDEX = {"x": 0, "y": 1, "z": 2}
-_AXIS_NAMES = ("x", "y", "z")
+_AXIS_INDEX: dict[AxisName, Literal[0, 1, 2]] = {"x": 0, "y": 1, "z": 2}
+_AXIS_NAMES: tuple[AxisName, AxisName, AxisName] = ("x", "y", "z")
 _YEE_OFFSETS_3D = {
     "Ex": {"z": 0.0, "y": 0.0, "x": 0.5},
     "Ey": {"z": 0.0, "y": 0.5, "x": 0.0},
@@ -30,6 +30,11 @@ _YEE_OFFSETS_3D = {
     "Hy": {"z": 0.5, "y": 0.0, "x": 0.5},
     "Hz": {"z": 0.0, "y": 0.5, "x": 0.5},
 }
+
+
+class _ModeCandidate(TypedDict):
+    neff: complex
+    fields: dict[str, np.ndarray]
 
 
 @dataclass(frozen=True)
@@ -169,7 +174,7 @@ def solve_beamz_mode(spec: ModePlaneSpec) -> DiscreteMode:
     if not isinstance(spec, ModePlaneSpec):
         raise TypeError("spec must be a ModePlaneSpec")
 
-    solver_axes = tuple(axis for axis in _AXIS_NAMES if axis != spec.axis)
+    solver_axes = _solver_axes_for_axis(spec.axis)
     eps_solver = _transpose_between_axes(spec.scalar_permittivity, spec.transverse_axes, solver_axes)
     dx_um = spec.resolution / 1e-6
     x_edges = tuple(float(v) for v in np.arange(eps_solver.shape[0] + 1) * dx_um)
@@ -269,7 +274,7 @@ def solve_beamz_mode(spec: ModePlaneSpec) -> DiscreteMode:
     )
 
 
-def _candidate_modes(result, spec: ModePlaneSpec) -> list[dict[str, object]]:
+def _candidate_modes(result, spec: ModePlaneSpec) -> list[_ModeCandidate]:
     candidates = []
     count = int(result.n_complex.shape[1])
     for mode_index in range(count):
@@ -277,11 +282,11 @@ def _candidate_modes(result, spec: ModePlaneSpec) -> list[dict[str, object]]:
             component: _field_plane(result.field_components[component], spec.axis, spec.transverse_axes, mode_index)
             for component in _COMPONENTS
         }
-        candidates.append({"neff": result.n_complex.values[0, mode_index], "fields": fields})
+        candidates.append({"neff": complex(result.n_complex.values[0, mode_index]), "fields": fields})
     return candidates
 
 
-def _field_plane(data_array, axis: str, transverse_axes: tuple[str, str], mode_index: int) -> np.ndarray:
+def _field_plane(data_array, axis: AxisName, transverse_axes: tuple[AxisName, AxisName], mode_index: int) -> np.ndarray:
     selected = data_array.isel(f=0, mode_index=mode_index)
     normal_dim = axis
     if normal_dim in selected.dims:
@@ -290,11 +295,11 @@ def _field_plane(data_array, axis: str, transverse_axes: tuple[str, str], mode_i
     return np.asarray(selected.values, dtype=np.complex128)
 
 
-def _sort_modes(candidates: list[dict[str, object]], spec: ModePlaneSpec) -> list[dict[str, object]]:
+def _sort_modes(candidates: list[_ModeCandidate], spec: ModePlaneSpec) -> list[_ModeCandidate]:
     if spec.polarization is None:
         return sorted(candidates, key=lambda item: float(np.real(item["neff"])), reverse=True)
 
-    def matches(item: dict[str, object]) -> bool:
+    def matches(item: _ModeCandidate) -> bool:
         return _polarization_fraction(item["fields"], spec.axis, spec.polarization) >= 0.5
 
     matching = [item for item in candidates if matches(item)]
@@ -304,7 +309,9 @@ def _sort_modes(candidates: list[dict[str, object]], spec: ModePlaneSpec) -> lis
     )
 
 
-def _polarization_fraction(fields: dict[str, np.ndarray], axis: str, polarization: str | None) -> float:
+def _polarization_fraction(
+    fields: dict[str, np.ndarray], axis: AxisName, polarization: PolarizationName | None
+) -> float:
     if polarization is None:
         return 1.0
     tangential_axes = tuple(idx for idx in range(3) if idx != _AXIS_INDEX[axis])
@@ -315,7 +322,11 @@ def _polarization_fraction(fields: dict[str, np.ndarray], axis: str, polarizatio
     return float(np.real(numerator / denominator))
 
 
-def _select_phase_reference_component(axis: str, polarization: str | None, fields: dict[str, np.ndarray]) -> str:
+def _select_phase_reference_component(
+    axis: AxisName,
+    polarization: PolarizationName | None,
+    fields: dict[str, np.ndarray],
+) -> str:
     preferred = {
         ("x", "tm"): "Hy",
         ("x", "te"): "Hz",
@@ -343,7 +354,7 @@ def _dominant_phase(field: np.ndarray) -> float:
 def _build_profiles(
     fields: dict[str, np.ndarray],
     spec: ModePlaneSpec,
-) -> tuple[dict[str, np.ndarray], dict[str, ComponentIndex], dict[str, object]]:
+) -> tuple[dict[str, np.ndarray], dict[str, ComponentIndex], dict[str, float]]:
     axis = spec.axis
     if axis == "x":
         return _build_x_profiles(fields, spec)
@@ -352,7 +363,10 @@ def _build_profiles(
     return _build_z_profiles(fields, spec)
 
 
-def _build_x_profiles(fields: dict[str, np.ndarray], spec: ModePlaneSpec):
+def _build_x_profiles(
+    fields: dict[str, np.ndarray],
+    spec: ModePlaneSpec,
+) -> tuple[dict[str, np.ndarray], dict[str, ComponentIndex], dict[str, float]]:
     ex_s = fields["Ex"]
     ey_s = _stagger_half(fields["Ey"], axis=1)
     ez_s = _stagger_half(fields["Ez"], axis=0)
@@ -363,7 +377,7 @@ def _build_x_profiles(fields: dict[str, np.ndarray], spec: ModePlaneSpec):
     y_start, y_end = _padded_bounds(spec.center[1], spec.width, spec.resolution, ny, spec.aperture_pad_cells)
     z_start, z_end = _padded_bounds(spec.center[2], spec.height, spec.resolution, nz, spec.aperture_pad_cells)
     staggered = {"Ex": ex_s, "Ey": ey_s, "Ez": ez_s, "Hx": hx_s, "Hy": hy_s, "Hz": hz_s}
-    indices = {
+    indices: dict[str, ComponentIndex] = {
         "Ex": (*_support_slices("Ex", "x", z_start, z_end, y_start, y_end, ex_s.shape), spec.offset_index),
         "Ey": (*_support_slices("Ey", "x", z_start, z_end, y_start, y_end, ey_s.shape), spec.plane_index),
         "Ez": (*_support_slices("Ez", "x", z_start, z_end, y_start, y_end, ez_s.shape), spec.plane_index),
@@ -381,7 +395,10 @@ def _build_x_profiles(fields: dict[str, np.ndarray], spec: ModePlaneSpec):
     return profiles, indices, {"initial_power": initial_power}
 
 
-def _build_y_profiles(fields: dict[str, np.ndarray], spec: ModePlaneSpec):
+def _build_y_profiles(
+    fields: dict[str, np.ndarray],
+    spec: ModePlaneSpec,
+) -> tuple[dict[str, np.ndarray], dict[str, ComponentIndex], dict[str, float]]:
     ex_s = _stagger_half(fields["Ex"], axis=1)
     ey_s = fields["Ey"]
     ez_s = _stagger_half(fields["Ez"], axis=0)
@@ -392,7 +409,7 @@ def _build_y_profiles(fields: dict[str, np.ndarray], spec: ModePlaneSpec):
     x_start, x_end = _padded_bounds(spec.center[0], spec.width, spec.resolution, nx, spec.aperture_pad_cells)
     z_start, z_end = _padded_bounds(spec.center[2], spec.height, spec.resolution, nz, spec.aperture_pad_cells)
     staggered = {"Ex": ex_s, "Ey": ey_s, "Ez": ez_s, "Hx": hx_s, "Hy": hy_s, "Hz": hz_s}
-    indices = {
+    indices: dict[str, ComponentIndex] = {
         "Ex": (*_support_slices("Ex", "y", z_start, z_end, x_start, x_end, ex_s.shape), spec.plane_index),
         "Ey": (*_support_slices("Ey", "y", z_start, z_end, x_start, x_end, ey_s.shape), spec.offset_index),
         "Ez": (*_support_slices("Ez", "y", z_start, z_end, x_start, x_end, ez_s.shape), spec.plane_index),
@@ -414,7 +431,10 @@ def _build_y_profiles(fields: dict[str, np.ndarray], spec: ModePlaneSpec):
     return profiles, indices, {"initial_power": initial_power}
 
 
-def _build_z_profiles(fields: dict[str, np.ndarray], spec: ModePlaneSpec):
+def _build_z_profiles(
+    fields: dict[str, np.ndarray],
+    spec: ModePlaneSpec,
+) -> tuple[dict[str, np.ndarray], dict[str, ComponentIndex], dict[str, float]]:
     ex_s = _stagger_half(fields["Ex"], axis=1)
     ey_s = _stagger_half(fields["Ey"], axis=0)
     ez_s = fields["Ez"]
@@ -429,7 +449,7 @@ def _build_z_profiles(fields: dict[str, np.ndarray], spec: ModePlaneSpec):
     ez_z_idx = int(np.clip(spec.plane_index, 0, max(nz - 2, 0)))
     hz_z_idx = int(np.clip(spec.offset_index, 0, nz - 1))
     staggered = {"Ex": ex_s, "Ey": ey_s, "Ez": ez_s, "Hx": hx_s, "Hy": hy_s, "Hz": hz_s}
-    indices = {
+    indices: dict[str, ComponentIndex] = {
         "Ex": (e_z_idx, *_support_slices("Ex", "z", y_start, y_end, x_start, x_end, ex_s.shape)),
         "Ey": (e_z_idx, *_support_slices("Ey", "z", y_start, y_end, x_start, x_end, ey_s.shape)),
         "Ez": (ez_z_idx, *_support_slices("Ez", "z", y_start, y_end, x_start, x_end, ez_s.shape)),
@@ -449,10 +469,14 @@ def _build_z_profiles(fields: dict[str, np.ndarray], spec: ModePlaneSpec):
 
 def _transpose_between_axes(
     values: np.ndarray,
-    src_axes: tuple[str, str],
-    dst_axes: tuple[str, str],
+    src_axes: tuple[AxisName, AxisName],
+    dst_axes: tuple[AxisName, AxisName],
 ) -> np.ndarray:
     return np.transpose(np.asarray(values, dtype=np.complex128), [src_axes.index(axis) for axis in dst_axes])
+
+
+def _solver_axes_for_axis(axis: AxisName) -> tuple[AxisName, AxisName]:
+    return cast(tuple[AxisName, AxisName], tuple(value for value in _AXIS_NAMES if value != axis))
 
 
 def _stagger_half(field: np.ndarray, axis: int) -> np.ndarray:
@@ -487,7 +511,7 @@ def _padded_bounds(
 
 def _support_slices(
     component: str,
-    axis: str,
+    axis: AxisName,
     row_start: int,
     row_stop: int,
     col_start: int,
@@ -526,7 +550,7 @@ def _crop_window_all(
         row_end = min(comp_row_stop, values.shape[0])
         col_end = min(comp_col_stop, values.shape[1])
         cropped = values[row_start:row_end, col_start:col_end]
-        window = _tukey2d(cropped.shape, alpha=spec.aperture_window_alpha)
+        window = _tukey2d(cast(tuple[int, int], cropped.shape), alpha=spec.aperture_window_alpha)
         profiles[component] = direction_sign * cropped * window
     return profiles
 
@@ -550,7 +574,7 @@ def _tukey(count: int, alpha: float) -> np.ndarray:
 
 def _normalize_profiles_by_flux(
     profiles: dict[str, np.ndarray],
-    axis: str,
+    axis: AxisName,
     d_area: float,
     direction_sign: float,
 ) -> float:
@@ -566,7 +590,7 @@ def _normalize_profiles_by_phase_referenced_flux(
     profiles: dict[str, np.ndarray],
     indices: dict[str, ComponentIndex],
     *,
-    axis: str,
+    axis: AxisName,
     d_area: float,
     direction_sign: float,
     omega: float,
@@ -602,7 +626,7 @@ def _phase_reference_profiles(
     profiles: dict[str, np.ndarray],
     indices: dict[str, ComponentIndex],
     *,
-    axis: str,
+    axis: AxisName,
     omega: float,
     k_num: float,
     ref_coord: float,
@@ -620,13 +644,13 @@ def _phase_reference_profiles(
 
 @dataclass(frozen=True)
 class _CoordSpec:
-    axis: str
+    axis: AxisName
     resolution: float
 
 
 def _modal_power_from_profiles(
     profiles: dict[str, np.ndarray],
-    axis: str,
+    axis: AxisName,
     d_area: float,
     direction_sign: float,
 ) -> float:
@@ -655,7 +679,7 @@ def _modal_power_from_profiles(
     return float(0.5 * direction_sign * np.real(np.sum(s_axis) * float(d_area)))
 
 
-def _axis_index_from_component_indices(indices, axis: str) -> int | None:
+def _axis_index_from_component_indices(indices: ComponentIndex | None, axis: AxisName) -> int | None:
     if indices is None:
         return None
     axis_pos = {"x": 2, "y": 1, "z": 0}[axis]
@@ -663,7 +687,7 @@ def _axis_index_from_component_indices(indices, axis: str) -> int | None:
     return None if isinstance(value, slice) else int(value)
 
 
-def _component_axis_coord(component: str, axis_index: int | None, spec) -> float:
+def _component_axis_coord(component: str, axis_index: int | None, spec: ModePlaneSpec | _CoordSpec) -> float:
     if axis_index is None:
         return 0.0
     staggered_along_axis = {
@@ -734,7 +758,7 @@ def _enforce_componentwise_parity(
 
 def _runtime_oriented_profiles(
     profiles: dict[str, np.ndarray],
-    axis: str,
+    axis: AxisName,
     direction_sign: float,
 ) -> dict[str, np.ndarray]:
     out = {key: np.asarray(value, dtype=np.complex128) for key, value in profiles.items()}
