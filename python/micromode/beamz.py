@@ -214,7 +214,12 @@ def solve_beamz_mode(spec: ModePlaneSpec) -> DiscreteMode:
     )
     omega = 2.0 * np.pi * spec.frequency
     k_num = _solve_numeric_k_axis(omega, spec.dt, spec.resolution, selected["neff"])
-    yee_refinement = spec.axis == "x" and bool(spec.component_permittivity)
+    boundary_neff = _boundary_refractive_index(spec.scalar_permittivity)
+    yee_refinement = (
+        spec.axis == "x"
+        and bool(spec.component_permittivity)
+        and float(np.real(selected["neff"])) > boundary_neff
+    )
     yee_residual = np.nan
     yee_frequency_ratio = np.nan
     yee_initial_frequency_ratio = np.nan
@@ -256,6 +261,7 @@ def solve_beamz_mode(spec: ModePlaneSpec) -> DiscreteMode:
         "time_convention": spec.time_convention,
         "aperture_window_alpha": spec.aperture_window_alpha,
         "yee_refinement": yee_refinement,
+        "boundary_neff": float(boundary_neff),
         "yee_residual": float(yee_residual),
         "yee_frequency_ratio": float(yee_frequency_ratio),
         "yee_initial_frequency_ratio": float(yee_initial_frequency_ratio),
@@ -293,6 +299,15 @@ def solve_beamz_mode(spec: ModePlaneSpec) -> DiscreteMode:
         power_scale=float(power_scale),
         diagnostics=diagnostics,
     )
+
+
+def _boundary_refractive_index(permittivity: np.ndarray) -> float:
+    """Return the largest refractive index touching the mode-plane boundary."""
+    eps = np.asarray(permittivity, dtype=np.complex128)
+    if eps.ndim != 2 or min(eps.shape) == 0:
+        return 0.0
+    boundary = np.concatenate((eps[0], eps[-1], eps[1:-1, 0], eps[1:-1, -1]))
+    return float(np.sqrt(max(float(np.max(np.real(boundary))), 0.0)))
 
 
 def _candidate_modes(result, spec: ModePlaneSpec) -> list[_ModeCandidate]:

@@ -10,6 +10,7 @@ import pytest
 import xarray as xr
 
 import micromode as mm
+from micromode.beamz import _boundary_refractive_index
 
 
 def _linspace_edges(start: float, stop: float, count: int) -> tuple[float, ...]:
@@ -176,6 +177,17 @@ def test_beamz_mode_plane_contract_returns_component_local_profiles(axis: str):
         assert np.isfinite(profile).all()
 
     assert abs(float(discrete.diagnostics["power_after_phase_reference"])) == pytest.approx(1.0, rel=2e-6, abs=2e-6)
+
+
+def test_beamz_boundary_index_uses_all_mode_plane_edges():
+    eps = np.ones((5, 6), dtype=float)
+    eps[0, 2] = 1.4**2
+    eps[-1, 3] = 1.5**2
+    eps[2, 0] = 1.6**2
+    eps[3, -1] = 1.7**2
+    eps[2, 3] = 3.4**2
+
+    assert _boundary_refractive_index(eps) == pytest.approx(1.7)
 
 
 def test_beamz_mode_plane_contract_validates_direction_axis():
