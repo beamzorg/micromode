@@ -66,6 +66,22 @@ def refine_x_mode_at_fixed_beta(
         ],
         format="csc",
     )
+    curl_e_beta = sparse.bmat(
+        [
+            [z((hx_n, ex_n)), z((hx_n, ey_n)), z((hx_n, ez_n))],
+            [z((hy_n, ex_n)), z((hy_n, ey_n)), -sparse.eye(ez_n)],
+            [z((hz_n, ex_n)), sparse.eye(ey_n), z((hz_n, ez_n))],
+        ],
+        format="csc",
+    )
+    curl_h_beta = sparse.bmat(
+        [
+            [z((ex_n, hx_n)), z((ex_n, hy_n)), z((ex_n, hz_n))],
+            [z((ey_n, hx_n)), z((ey_n, hy_n)), -sparse.eye(hz_n)],
+            [z((ez_n, hx_n)), sparse.eye(hy_n), z((ez_n, hz_n))],
+        ],
+        format="csc",
+    )
 
     mu = np.concatenate(
         [_material(component_permeability[name], indices[name], out[name].shape) for name in ("Hx", "Hy", "Hz")]
@@ -99,9 +115,18 @@ def refine_x_mode_at_fixed_beta(
     frequency_ratio_initial = frequency_ratio
     if _correct_beta:
         q_axis = 2.0 * np.sin(0.5 * float(k_num) * d) / d
-        # One Newton step in q². For the staggered vector operator the local
-        # eigenvalue slope is approximately one half, hence the factor two.
-        q_corrected = np.sqrt(max(q_axis**2 - 2.0 * (eigenvalue - target), 0.0))
+        q_probe = 0.98 * q_axis
+        delta_probe = -1j * sign * q_probe
+        delta_change = delta_probe - delta
+        operator_probe = (
+            (curl_h + delta_change * curl_h_beta) @ sparse.diags(1.0 / mu) @ (curl_e + delta_change * curl_e_beta)
+        )
+        denominator = np.vdot(electric, mass @ electric)
+        eigenvalue_probe = float(np.real(np.vdot(electric, operator_probe @ electric) / denominator))
+        slope = (eigenvalue_probe - eigenvalue) / (q_probe**2 - q_axis**2)
+        if not np.isfinite(slope) or abs(slope) <= np.finfo(float).eps:
+            slope = 0.5
+        q_corrected = np.sqrt(max(q_axis**2 - (eigenvalue - target) / slope, 0.0))
         k_corrected = 2.0 * np.arcsin(np.clip(0.5 * q_corrected * d, -1.0, 1.0)) / d
         if np.isfinite(k_corrected) and k_corrected > 0.0:
             refined, residual, frequency_ratio, _, _ = refine_x_mode_at_fixed_beta(
