@@ -13,6 +13,7 @@ from typing import Literal, TypedDict, cast
 import numpy as np
 
 from .raster import solve_grid
+from .yee import refine_x_mode_at_fixed_beta
 
 AxisName = Literal["x", "y", "z"]
 DirectionName = Literal["+x", "-x", "+y", "-y", "+z", "-z"]
@@ -213,6 +214,22 @@ def solve_beamz_mode(spec: ModePlaneSpec) -> DiscreteMode:
     )
     omega = 2.0 * np.pi * spec.frequency
     k_num = _solve_numeric_k_axis(omega, spec.dt, spec.resolution, selected["neff"])
+    yee_refinement = spec.axis == "x" and bool(spec.component_permittivity)
+    yee_residual = np.nan
+    yee_frequency_ratio = np.nan
+    yee_power_correction = 1.0
+    if yee_refinement:
+        profiles, yee_residual, yee_frequency_ratio, k_num, yee_power_correction = refine_x_mode_at_fixed_beta(
+            profiles,
+            indices,
+            component_permittivity=spec.component_permittivity,
+            component_permeability=spec.component_permeability,
+            omega=omega,
+            dt=spec.dt,
+            resolution=spec.resolution,
+            k_num=k_num,
+            direction_sign=_direction_sign(spec.direction),
+        )
     profiles, power_scale = _normalize_profiles_by_phase_referenced_flux(
         profiles,
         indices,
@@ -238,6 +255,10 @@ def solve_beamz_mode(spec: ModePlaneSpec) -> DiscreteMode:
         "phase_reference": spec.phase_reference,
         "time_convention": spec.time_convention,
         "aperture_window_alpha": spec.aperture_window_alpha,
+        "yee_refinement": yee_refinement,
+        "yee_residual": float(yee_residual),
+        "yee_frequency_ratio": float(yee_frequency_ratio),
+        "yee_power_correction": float(yee_power_correction),
         "power_before_phase_reference": float(extra.get("initial_power", np.nan)),
         "power_after_phase_reference": float(
             _modal_power_from_profiles(
@@ -579,8 +600,8 @@ def _normalize_profiles_by_flux(
     direction_sign: float,
 ) -> float:
     flux = _modal_power_from_profiles(profiles, axis=axis, d_area=d_area, direction_sign=direction_sign)
-    if np.isfinite(flux) and abs(flux) > 1e-18:
-        scale = float(np.clip(np.sqrt(1.0 / abs(flux)), 1e-6, 1e6))
+    if np.isfinite(flux) and abs(flux) > np.finfo(float).tiny:
+        scale = float(np.sqrt(1.0 / abs(flux)))
         for key, value in profiles.items():
             profiles[key] = np.asarray(value, dtype=np.complex128) * scale
     return float(flux)
@@ -613,9 +634,9 @@ def _normalize_profiles_by_phase_referenced_flux(
         d_area=d_area,
         direction_sign=direction_sign,
     )
-    if (not np.isfinite(flux)) or abs(flux) <= 1e-18:
+    if (not np.isfinite(flux)) or abs(flux) <= np.finfo(float).tiny:
         return profiles, 1.0
-    scale = float(np.clip(np.sqrt(1.0 / abs(flux)), 1e-6, 1e6))
+    scale = float(np.sqrt(1.0 / abs(flux)))
     return (
         {key: np.asarray(value, dtype=np.complex128) * scale for key, value in profiles.items()},
         scale,
@@ -660,23 +681,12 @@ def _modal_power_from_profiles(
         terms = ("Ez", "Ex", "Hx", "Hz")
     else:
         terms = ("Ex", "Ey", "Hy", "Hx")
-    arrays = [
-        np.asarray(
-            profiles.get(name, np.zeros((0,), dtype=np.complex128)),
-            dtype=np.complex128,
-        )
-        for name in terms
-    ]
+    arrays = [np.asarray(profiles.get(name, ()), dtype=np.complex128) for name in terms]
     if any(arr.size == 0 for arr in arrays):
         return 0.0
-    arrays = [arr[:, None] if arr.ndim == 1 else arr for arr in arrays]
-    rows = min(arr.shape[0] for arr in arrays)
-    cols = min(arr.shape[1] for arr in arrays)
-    if rows <= 0 or cols <= 0:
-        return 0.0
-    a0, a1, b0, b1 = [arr[:rows, :cols] for arr in arrays]
-    s_axis = a0 * np.conjugate(b0) - a1 * np.conjugate(b1)
-    return float(0.5 * direction_sign * np.real(np.sum(s_axis) * float(d_area)))
+    a0, a1, b0, b1 = arrays
+    flux = np.vdot(b0.reshape(-1), a0.reshape(-1)) - np.vdot(b1.reshape(-1), a1.reshape(-1))
+    return float(0.5 * direction_sign * np.real(flux * float(d_area)))
 
 
 def _axis_index_from_component_indices(indices: ComponentIndex | None, axis: AxisName) -> int | None:
