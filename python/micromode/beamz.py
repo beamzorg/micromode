@@ -217,9 +217,9 @@ def solve_beamz_mode(spec: ModePlaneSpec) -> DiscreteMode:
     yee_refinement = spec.axis == "x" and bool(spec.component_permittivity)
     yee_residual = np.nan
     yee_frequency_ratio = np.nan
-    yee_power_correction = 1.0
+    yee_initial_frequency_ratio = np.nan
     if yee_refinement:
-        profiles, yee_residual, yee_frequency_ratio, k_num, yee_power_correction = refine_x_mode_at_fixed_beta(
+        profiles, yee_residual, yee_frequency_ratio, k_num, yee_initial_frequency_ratio = refine_x_mode_at_fixed_beta(
             profiles,
             indices,
             component_permittivity=spec.component_permittivity,
@@ -258,7 +258,7 @@ def solve_beamz_mode(spec: ModePlaneSpec) -> DiscreteMode:
         "yee_refinement": yee_refinement,
         "yee_residual": float(yee_residual),
         "yee_frequency_ratio": float(yee_frequency_ratio),
-        "yee_power_correction": float(yee_power_correction),
+        "yee_initial_frequency_ratio": float(yee_initial_frequency_ratio),
         "power_before_phase_reference": float(extra.get("initial_power", np.nan)),
         "power_after_phase_reference": float(
             _modal_power_from_profiles(

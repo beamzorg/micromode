@@ -22,7 +22,7 @@ def test_fixed_beta_refinement_returns_normalized_yee_shapes():
     eps = {name: np.full(shape, 2.25) for name, shape in shapes.items() if name.startswith("E")}
     mu = {name: np.ones(shape) for name, shape in shapes.items() if name.startswith("H")}
 
-    refined, residual, ratio, k_num, power_correction = refine_x_mode_at_fixed_beta(
+    refined, residual, ratio, k_num, initial_ratio = refine_x_mode_at_fixed_beta(
         profiles,
         indices,
         component_permittivity=eps,
@@ -36,6 +36,6 @@ def test_fixed_beta_refinement_returns_normalized_yee_shapes():
 
     assert {name: value.shape for name, value in refined.items()} == shapes
     assert residual < 1e-8
-    assert abs(ratio - 1.0) < abs(power_correction - 1.0)
+    assert abs(ratio - 1.0) < abs(initial_ratio - 1.0)
     assert k_num > 0.0
-    assert power_correction > 0.0
+    assert initial_ratio > 0.0
