@@ -13,7 +13,7 @@ from typing import Literal, TypedDict, cast
 import numpy as np
 
 from .raster import solve_grid
-from .yee import refine_x_mode_at_fixed_beta
+from .yee import refine_x_mode_at_fixed_beta, validate_x_mode_refinement
 
 AxisName = Literal["x", "y", "z"]
 DirectionName = Literal["+x", "-x", "+y", "-y", "+z", "-z"]
@@ -73,6 +73,8 @@ class ModePlaneSpec:
     component_offsets: dict[str, dict[str, float]] = field(default_factory=lambda: dict(_YEE_OFFSETS_3D))
     component_permittivity: dict[str, np.ndarray] = field(default_factory=dict)
     component_permeability: dict[str, np.ndarray] = field(default_factory=dict)
+    # Guarded by joint field, power, energy, and discrete-Maxwell validation.
+    yee_refinement: bool = True
     boundary: str = "beamz-finite-aperture"
 
     def __post_init__(self) -> None:
@@ -135,6 +137,7 @@ class ModePlaneSpec:
         object.__setattr__(self, "num_modes", None if self.num_modes is None else int(self.num_modes))
         object.__setattr__(self, "aperture_pad_cells", int(self.aperture_pad_cells))
         object.__setattr__(self, "aperture_window_alpha", float(self.aperture_window_alpha))
+        object.__setattr__(self, "yee_refinement", bool(self.yee_refinement))
 
         if self.polarization is not None:
             pol = str(self.polarization).lower()
@@ -215,26 +218,61 @@ def solve_beamz_mode(spec: ModePlaneSpec) -> DiscreteMode:
     omega = 2.0 * np.pi * spec.frequency
     k_num = _solve_numeric_k_axis(omega, spec.dt, spec.resolution, selected["neff"])
     boundary_neff = _boundary_refractive_index(spec.scalar_permittivity)
-    yee_refinement = (
+    yee_refinement_eligible = (
         spec.axis == "x"
         and bool(spec.component_permittivity)
         and float(np.real(selected["neff"])) > boundary_neff
     )
+    yee_refinement_requested = bool(spec.yee_refinement)
+    yee_refinement_attempted = yee_refinement_requested and yee_refinement_eligible
+    yee_refinement_accepted = False
+    yee_refinement_rejection_reason = ""
+    yee_validation: dict[str, object] = {}
     yee_residual = np.nan
     yee_frequency_ratio = np.nan
     yee_initial_frequency_ratio = np.nan
-    if yee_refinement:
-        profiles, yee_residual, yee_frequency_ratio, k_num, yee_initial_frequency_ratio = refine_x_mode_at_fixed_beta(
-            profiles,
-            indices,
-            component_permittivity=spec.component_permittivity,
-            component_permeability=spec.component_permeability,
-            omega=omega,
-            dt=spec.dt,
-            resolution=spec.resolution,
-            k_num=k_num,
-            direction_sign=_direction_sign(spec.direction),
-        )
+    if yee_refinement_requested and not yee_refinement_eligible:
+        yee_refinement_rejection_reason = "mode is not eligible for x-normal guided-mode refinement"
+    if yee_refinement_attempted:
+        seed_profiles = {name: np.asarray(value, dtype=np.complex128).copy() for name, value in profiles.items()}
+        seed_k_num = float(k_num)
+        try:
+            candidate, yee_residual, yee_frequency_ratio, candidate_k_num, yee_initial_frequency_ratio = (
+                refine_x_mode_at_fixed_beta(
+                    seed_profiles,
+                    indices,
+                    component_permittivity=spec.component_permittivity,
+                    component_permeability=spec.component_permeability,
+                    omega=omega,
+                    dt=spec.dt,
+                    resolution=spec.resolution,
+                    k_num=seed_k_num,
+                    direction_sign=_direction_sign(spec.direction),
+                )
+            )
+            yee_refinement_accepted, yee_validation = validate_x_mode_refinement(
+                seed_profiles,
+                candidate,
+                indices,
+                component_permittivity=spec.component_permittivity,
+                component_permeability=spec.component_permeability,
+                omega=omega,
+                dt=spec.dt,
+                resolution=spec.resolution,
+                k_num=candidate_k_num,
+                direction_sign=_direction_sign(spec.direction),
+            )
+            yee_refinement_rejection_reason = str(yee_validation.get("rejection_reason", ""))
+            if yee_refinement_accepted:
+                profiles = candidate
+                k_num = float(candidate_k_num)
+            else:
+                profiles = seed_profiles
+                k_num = seed_k_num
+        except Exception as exc:
+            profiles = seed_profiles
+            k_num = seed_k_num
+            yee_refinement_rejection_reason = f"{type(exc).__name__}: {exc}"
     profiles, power_scale = _normalize_profiles_by_phase_referenced_flux(
         profiles,
         indices,
@@ -260,7 +298,13 @@ def solve_beamz_mode(spec: ModePlaneSpec) -> DiscreteMode:
         "phase_reference": spec.phase_reference,
         "time_convention": spec.time_convention,
         "aperture_window_alpha": spec.aperture_window_alpha,
-        "yee_refinement": yee_refinement,
+        "yee_refinement": yee_refinement_accepted,
+        "yee_refinement_requested": yee_refinement_requested,
+        "yee_refinement_eligible": yee_refinement_eligible,
+        "yee_refinement_attempted": yee_refinement_attempted,
+        "yee_refinement_accepted": yee_refinement_accepted,
+        "yee_refinement_rejection_reason": yee_refinement_rejection_reason,
+        "yee_refinement_validation": yee_validation,
         "boundary_neff": float(boundary_neff),
         "yee_residual": float(yee_residual),
         "yee_frequency_ratio": float(yee_frequency_ratio),

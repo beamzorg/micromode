@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import replace
 from typing import Any
 
 import numpy as np
@@ -118,6 +119,22 @@ def _beamz_mode_plane_spec(axis: str = "x") -> mm.ModePlaneSpec:
     )
 
 
+def _with_component_materials(spec: mm.ModePlaneSpec, *, yee_refinement: bool | None = None) -> mm.ModePlaneSpec:
+    component_permittivity = {
+        name: np.full(spec.component_shapes[name], 2.25, dtype=np.float64) for name in ("Ex", "Ey", "Ez")
+    }
+    component_permeability = {
+        name: np.ones(spec.component_shapes[name], dtype=np.float64) for name in ("Hx", "Hy", "Hz")
+    }
+    updates: dict[str, object] = {
+        "component_permittivity": component_permittivity,
+        "component_permeability": component_permeability,
+    }
+    if yee_refinement is not None:
+        updates["yee_refinement"] = yee_refinement
+    return replace(spec, **updates)
+
+
 def test_grid_api_solves_with_scipy_solver():
     """Verify grid api solves with scipy solver."""
     eps, x_edges, y_edges = _strip_grid(6, 5)
@@ -177,6 +194,52 @@ def test_beamz_mode_plane_contract_returns_component_local_profiles(axis: str):
         assert np.isfinite(profile).all()
 
     assert abs(float(discrete.diagnostics["power_after_phase_reference"])) == pytest.approx(1.0, rel=2e-6, abs=2e-6)
+
+
+def test_beamz_yee_refinement_can_be_disabled(monkeypatch):
+    """Verify callers can explicitly retain the unrefined mode profile."""
+    import micromode.beamz as beamz_module
+
+    spec = _with_component_materials(_beamz_mode_plane_spec("x"), yee_refinement=False)
+
+    def unexpected_refinement(*_args, **_kwargs):
+        raise AssertionError("disabled mode solve must not call Yee refinement")
+
+    monkeypatch.setattr(beamz_module, "refine_x_mode_at_fixed_beta", unexpected_refinement)
+    discrete = mm.solve_beamz_mode(spec)
+
+    assert discrete.diagnostics["yee_refinement_requested"] is False
+    assert discrete.diagnostics["yee_refinement_attempted"] is False
+    assert discrete.diagnostics["yee_refinement_accepted"] is False
+    assert abs(float(discrete.diagnostics["power_after_phase_reference"])) == pytest.approx(1.0, rel=2e-6)
+
+
+def test_beamz_rejects_unphysical_refinement_and_falls_back_atomically(monkeypatch):
+    """Verify a broken E/H candidate cannot replace the original profiles or k."""
+    import micromode.beamz as beamz_module
+
+    base_spec = _with_component_materials(_beamz_mode_plane_spec("x"), yee_refinement=False)
+    baseline = mm.solve_beamz_mode(base_spec)
+
+    def broken_refinement(profiles, _indices, **kwargs):
+        candidate = {name: np.asarray(value, dtype=np.complex128).copy() for name, value in profiles.items()}
+        for component in ("Ex", "Ey", "Ez"):
+            candidate[component] *= 1e11
+        return candidate, 1e-15, 1.0, 1.2 * float(kwargs["k_num"]), 1.0
+
+    monkeypatch.setattr(beamz_module, "refine_x_mode_at_fixed_beta", broken_refinement)
+    refined_spec = _with_component_materials(_beamz_mode_plane_spec("x"))
+    assert refined_spec.yee_refinement is True
+    guarded = mm.solve_beamz_mode(refined_spec)
+
+    assert guarded.diagnostics["yee_refinement_requested"] is True
+    assert guarded.diagnostics["yee_refinement_attempted"] is True
+    assert guarded.diagnostics["yee_refinement_accepted"] is False
+    assert "E/H impedance change" in guarded.diagnostics["yee_refinement_rejection_reason"]
+    assert guarded.k_num_axis == pytest.approx(baseline.k_num_axis)
+    for component in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz"):
+        np.testing.assert_allclose(guarded.profiles[component], baseline.profiles[component], rtol=1e-9, atol=1e-9)
+    assert abs(float(guarded.diagnostics["power_after_phase_reference"])) == pytest.approx(1.0, rel=2e-6)
 
 
 def test_beamz_boundary_index_uses_all_mode_plane_edges():
