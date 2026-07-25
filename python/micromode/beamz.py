@@ -8,7 +8,7 @@ planes that BEAMZ can inject without another interpretation layer.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal, TypedDict, cast
+from typing import Any, Literal, TypedDict, cast
 
 import numpy as np
 
@@ -219,15 +219,13 @@ def solve_beamz_mode(spec: ModePlaneSpec) -> DiscreteMode:
     k_num = _solve_numeric_k_axis(omega, spec.dt, spec.resolution, selected["neff"])
     boundary_neff = _boundary_refractive_index(spec.scalar_permittivity)
     yee_refinement_eligible = (
-        spec.axis == "x"
-        and bool(spec.component_permittivity)
-        and float(np.real(selected["neff"])) > boundary_neff
+        spec.axis == "x" and bool(spec.component_permittivity) and float(np.real(selected["neff"])) > boundary_neff
     )
     yee_refinement_requested = bool(spec.yee_refinement)
     yee_refinement_attempted = yee_refinement_requested and yee_refinement_eligible
     yee_refinement_accepted = False
     yee_refinement_rejection_reason = ""
-    yee_validation: dict[str, object] = {}
+    yee_validation: dict[str, Any] = {}
     yee_residual = np.nan
     yee_frequency_ratio = np.nan
     yee_initial_frequency_ratio = np.nan

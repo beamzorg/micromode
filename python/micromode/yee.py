@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any, cast
+
 import numpy as np
 
 _C0 = 299_792_458.0
@@ -54,7 +56,15 @@ def refine_x_mode_at_fixed_beta(
     target = (omega_d / _C0) ** 2
     seed = np.concatenate([out[name].reshape(-1) for name in ("Ex", "Ey", "Ez")])
     count = min(4, operator.shape[0] - 2)
-    values, vectors = spla.eigs(operator, M=mass, k=count, sigma=target, v0=seed, tol=1e-9)
+    eigenpairs = spla.eigs(
+        operator,
+        M=mass,
+        k=count,
+        sigma=target,
+        v0=seed,
+        tol=1e-9,  # pyright: ignore[reportArgumentType] -- SciPy infers int from its untyped default.
+    )
+    values, vectors = cast(tuple[np.ndarray, np.ndarray], eigenpairs)
     overlaps = np.abs(np.conjugate(seed) @ vectors)
     selected = int(np.argmax(overlaps))
     electric = np.asarray(vectors[:, selected], dtype=np.complex128)
@@ -136,7 +146,7 @@ def validate_x_mode_refinement(
 
     seed = {name: np.asarray(value, dtype=np.complex128) for name, value in seed_profiles.items()}
     candidate = {name: np.asarray(value, dtype=np.complex128) for name, value in candidate_profiles.items()}
-    diagnostics = {
+    diagnostics: dict[str, Any] = {
         "electric_overlap": _normalized_component_overlap(seed, candidate, _E_COMPONENTS),
         "magnetic_overlap": _normalized_component_overlap(seed, candidate, _H_COMPONENTS),
     }
@@ -183,9 +193,7 @@ def validate_x_mode_refinement(
     diagnostics["ampere_residual"] = _relative_pair_residual(ampere_left, ampere_right)
 
     rejection_reasons = []
-    if minimum_electric_overlap is not None and diagnostics["electric_overlap"] < float(
-        minimum_electric_overlap
-    ):
+    if minimum_electric_overlap is not None and diagnostics["electric_overlap"] < float(minimum_electric_overlap):
         rejection_reasons.append("electric overlap")
     if diagnostics["magnetic_overlap"] < float(minimum_magnetic_overlap):
         rejection_reasons.append("magnetic overlap")
