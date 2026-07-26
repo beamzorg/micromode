@@ -8,11 +8,12 @@ planes that BEAMZ can inject without another interpretation layer.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal, TypedDict, cast
+from typing import Any, Literal, TypedDict, cast
 
 import numpy as np
 
 from .raster import solve_grid
+from .yee import refine_x_mode_at_fixed_beta, validate_x_mode_refinement
 
 AxisName = Literal["x", "y", "z"]
 DirectionName = Literal["+x", "-x", "+y", "-y", "+z", "-z"]
@@ -72,6 +73,8 @@ class ModePlaneSpec:
     component_offsets: dict[str, dict[str, float]] = field(default_factory=lambda: dict(_YEE_OFFSETS_3D))
     component_permittivity: dict[str, np.ndarray] = field(default_factory=dict)
     component_permeability: dict[str, np.ndarray] = field(default_factory=dict)
+    # Guarded by joint field, power, energy, and discrete-Maxwell validation.
+    yee_refinement: bool = True
     boundary: str = "beamz-finite-aperture"
 
     def __post_init__(self) -> None:
@@ -134,6 +137,7 @@ class ModePlaneSpec:
         object.__setattr__(self, "num_modes", None if self.num_modes is None else int(self.num_modes))
         object.__setattr__(self, "aperture_pad_cells", int(self.aperture_pad_cells))
         object.__setattr__(self, "aperture_window_alpha", float(self.aperture_window_alpha))
+        object.__setattr__(self, "yee_refinement", bool(self.yee_refinement))
 
         if self.polarization is not None:
             pol = str(self.polarization).lower()
@@ -213,6 +217,60 @@ def solve_beamz_mode(spec: ModePlaneSpec) -> DiscreteMode:
     )
     omega = 2.0 * np.pi * spec.frequency
     k_num = _solve_numeric_k_axis(omega, spec.dt, spec.resolution, selected["neff"])
+    boundary_neff = _boundary_refractive_index(spec.scalar_permittivity)
+    yee_refinement_eligible = (
+        spec.axis == "x" and bool(spec.component_permittivity) and float(np.real(selected["neff"])) > boundary_neff
+    )
+    yee_refinement_requested = bool(spec.yee_refinement)
+    yee_refinement_attempted = yee_refinement_requested and yee_refinement_eligible
+    yee_refinement_accepted = False
+    yee_refinement_rejection_reason = ""
+    yee_validation: dict[str, Any] = {}
+    yee_residual = np.nan
+    yee_frequency_ratio = np.nan
+    yee_initial_frequency_ratio = np.nan
+    if yee_refinement_requested and not yee_refinement_eligible:
+        yee_refinement_rejection_reason = "mode is not eligible for x-normal guided-mode refinement"
+    if yee_refinement_attempted:
+        seed_profiles = {name: np.asarray(value, dtype=np.complex128).copy() for name, value in profiles.items()}
+        seed_k_num = float(k_num)
+        try:
+            candidate, yee_residual, yee_frequency_ratio, candidate_k_num, yee_initial_frequency_ratio = (
+                refine_x_mode_at_fixed_beta(
+                    seed_profiles,
+                    indices,
+                    component_permittivity=spec.component_permittivity,
+                    component_permeability=spec.component_permeability,
+                    omega=omega,
+                    dt=spec.dt,
+                    resolution=spec.resolution,
+                    k_num=seed_k_num,
+                    direction_sign=_direction_sign(spec.direction),
+                )
+            )
+            yee_refinement_accepted, yee_validation = validate_x_mode_refinement(
+                seed_profiles,
+                candidate,
+                indices,
+                component_permittivity=spec.component_permittivity,
+                component_permeability=spec.component_permeability,
+                omega=omega,
+                dt=spec.dt,
+                resolution=spec.resolution,
+                k_num=candidate_k_num,
+                direction_sign=_direction_sign(spec.direction),
+            )
+            yee_refinement_rejection_reason = str(yee_validation.get("rejection_reason", ""))
+            if yee_refinement_accepted:
+                profiles = candidate
+                k_num = float(candidate_k_num)
+            else:
+                profiles = seed_profiles
+                k_num = seed_k_num
+        except Exception as exc:
+            profiles = seed_profiles
+            k_num = seed_k_num
+            yee_refinement_rejection_reason = f"{type(exc).__name__}: {exc}"
     profiles, power_scale = _normalize_profiles_by_phase_referenced_flux(
         profiles,
         indices,
@@ -238,6 +296,17 @@ def solve_beamz_mode(spec: ModePlaneSpec) -> DiscreteMode:
         "phase_reference": spec.phase_reference,
         "time_convention": spec.time_convention,
         "aperture_window_alpha": spec.aperture_window_alpha,
+        "yee_refinement": yee_refinement_accepted,
+        "yee_refinement_requested": yee_refinement_requested,
+        "yee_refinement_eligible": yee_refinement_eligible,
+        "yee_refinement_attempted": yee_refinement_attempted,
+        "yee_refinement_accepted": yee_refinement_accepted,
+        "yee_refinement_rejection_reason": yee_refinement_rejection_reason,
+        "yee_refinement_validation": yee_validation,
+        "boundary_neff": float(boundary_neff),
+        "yee_residual": float(yee_residual),
+        "yee_frequency_ratio": float(yee_frequency_ratio),
+        "yee_initial_frequency_ratio": float(yee_initial_frequency_ratio),
         "power_before_phase_reference": float(extra.get("initial_power", np.nan)),
         "power_after_phase_reference": float(
             _modal_power_from_profiles(
@@ -272,6 +341,15 @@ def solve_beamz_mode(spec: ModePlaneSpec) -> DiscreteMode:
         power_scale=float(power_scale),
         diagnostics=diagnostics,
     )
+
+
+def _boundary_refractive_index(permittivity: np.ndarray) -> float:
+    """Return the largest refractive index touching the mode-plane boundary."""
+    eps = np.asarray(permittivity, dtype=np.complex128)
+    if eps.ndim != 2 or min(eps.shape) == 0:
+        return 0.0
+    boundary = np.concatenate((eps[0], eps[-1], eps[1:-1, 0], eps[1:-1, -1]))
+    return float(np.sqrt(max(float(np.max(np.real(boundary))), 0.0)))
 
 
 def _candidate_modes(result, spec: ModePlaneSpec) -> list[_ModeCandidate]:
@@ -579,8 +657,8 @@ def _normalize_profiles_by_flux(
     direction_sign: float,
 ) -> float:
     flux = _modal_power_from_profiles(profiles, axis=axis, d_area=d_area, direction_sign=direction_sign)
-    if np.isfinite(flux) and abs(flux) > 1e-18:
-        scale = float(np.clip(np.sqrt(1.0 / abs(flux)), 1e-6, 1e6))
+    if np.isfinite(flux) and abs(flux) > np.finfo(float).tiny:
+        scale = float(np.sqrt(1.0 / abs(flux)))
         for key, value in profiles.items():
             profiles[key] = np.asarray(value, dtype=np.complex128) * scale
     return float(flux)
@@ -613,9 +691,9 @@ def _normalize_profiles_by_phase_referenced_flux(
         d_area=d_area,
         direction_sign=direction_sign,
     )
-    if (not np.isfinite(flux)) or abs(flux) <= 1e-18:
+    if (not np.isfinite(flux)) or abs(flux) <= np.finfo(float).tiny:
         return profiles, 1.0
-    scale = float(np.clip(np.sqrt(1.0 / abs(flux)), 1e-6, 1e6))
+    scale = float(np.sqrt(1.0 / abs(flux)))
     return (
         {key: np.asarray(value, dtype=np.complex128) * scale for key, value in profiles.items()},
         scale,
@@ -660,23 +738,12 @@ def _modal_power_from_profiles(
         terms = ("Ez", "Ex", "Hx", "Hz")
     else:
         terms = ("Ex", "Ey", "Hy", "Hx")
-    arrays = [
-        np.asarray(
-            profiles.get(name, np.zeros((0,), dtype=np.complex128)),
-            dtype=np.complex128,
-        )
-        for name in terms
-    ]
+    arrays = [np.asarray(profiles.get(name, ()), dtype=np.complex128) for name in terms]
     if any(arr.size == 0 for arr in arrays):
         return 0.0
-    arrays = [arr[:, None] if arr.ndim == 1 else arr for arr in arrays]
-    rows = min(arr.shape[0] for arr in arrays)
-    cols = min(arr.shape[1] for arr in arrays)
-    if rows <= 0 or cols <= 0:
-        return 0.0
-    a0, a1, b0, b1 = [arr[:rows, :cols] for arr in arrays]
-    s_axis = a0 * np.conjugate(b0) - a1 * np.conjugate(b1)
-    return float(0.5 * direction_sign * np.real(np.sum(s_axis) * float(d_area)))
+    a0, a1, b0, b1 = arrays
+    flux = np.vdot(b0.reshape(-1), a0.reshape(-1)) - np.vdot(b1.reshape(-1), a1.reshape(-1))
+    return float(0.5 * direction_sign * np.real(flux * float(d_area)))
 
 
 def _axis_index_from_component_indices(indices: ComponentIndex | None, axis: AxisName) -> int | None:
