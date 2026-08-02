@@ -35,7 +35,7 @@ That is the point: you give it a mode-plane material grid, and it returns guided
 modes with the diagnostics and result helpers needed by downstream simulation
 workflows.
 
-_Micromode is the **default mode solver** in the [BEAMZ FDTD engine](https://github.com/beamzorg/beamz)._
+> _Micromode is the **default mode solver** in the [BEAMZ FDTD engine](https://github.com/beamzorg/beamz)._ It was originally published as a standalone package for greater readability and better audits but has since been reintegrated directly into BeamZ.
 
 
 ## Quick Start
